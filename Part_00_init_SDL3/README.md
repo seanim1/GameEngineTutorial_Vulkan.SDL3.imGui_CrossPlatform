@@ -1,0 +1,1 @@
+Making sure that SDL is available. No windowing yet.

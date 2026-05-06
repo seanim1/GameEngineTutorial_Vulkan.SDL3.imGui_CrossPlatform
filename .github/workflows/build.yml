@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: install vcpkg deps
-        run: vcpkg install sdl3:x64-windows vulkan:x64-windows
+        run: vcpkg install sdl3:x64-windows vulkan:x64-windows glslang:x64-windows
         env:
           VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
       - name: configure

@@ -8,7 +8,8 @@ sudo apt-get install -y \
     libxrandr-dev libxinerama-dev libxcursor-dev \
     libxi-dev libxss-dev libxkbcommon-dev \
     libwayland-dev wayland-protocols \
-    vulkan-tools libvulkan-dev libvulkan1
+    vulkan-tools libvulkan-dev libvulkan1 \
+    glslang-tools
 
 if [ ! -d third_party/SDL3 ]; then
     mkdir -p third_party
