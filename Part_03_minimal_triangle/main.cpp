@@ -1,22 +1,46 @@
+#define SDL_MAIN_USE_CALLBACKS 1
+
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
+#include <SDL3/SDL_main_impl.h>
 #include <vulkan/vulkan.h>
+#include <memory>
 #ifdef __APPLE__
     #define VK_ENABLE_BETA_EXTENSIONS
     #include <vulkan/vulkan_metal.h>
     #include <vulkan/vulkan_beta.h>
 #endif
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <stdbool.h>
 
 #define WINDOW_WIDTH 800
 #define WINDOW_HEIGHT 600
 
+struct AppState {
+    SDL_Window* window = nullptr;
+    VkInstance instance = nullptr;
+    VkSurfaceKHR surface = nullptr;
+    VkPhysicalDevice physical_device = nullptr;
+    VkDevice device = nullptr;
+    VkQueue graphics_queue = nullptr;
+    VkSwapchainKHR swapchain = nullptr;
+    VkImage* images = nullptr;
+    VkImageView* image_views = nullptr;
+    VkRenderPass render_pass = nullptr;
+    VkFramebuffer* framebuffers = nullptr;
+    VkPipeline pipeline = nullptr;
+    VkPipelineLayout pipeline_layout = nullptr;
+    VkCommandPool command_pool = nullptr;
+    VkCommandBuffer* command_buffers = nullptr;
+    VkSemaphore image_available_sem = nullptr;
+    VkSemaphore render_finished_sem = nullptr;
+    VkFence in_flight_fence = nullptr;
+    uint32_t image_count = 0;
+    uint32_t graphics_family = 0;
+    VkSurfaceCapabilitiesKHR surface_caps = {};
+};
+
 void check_vk(VkResult result, const char* op) {
     if (result != VK_SUCCESS) {
-        fprintf(stderr, "Vulkan error in %s: %d\n", op, result);
+        SDL_Log("Vulkan error (%s): %d", op, result);
         exit(1);
     }
 }
@@ -24,8 +48,8 @@ void check_vk(VkResult result, const char* op) {
 uint32_t* load_shader_file(const char* filename, size_t* out_size) {
     FILE* f = fopen(filename, "rb");
     if (!f) {
-        fprintf(stderr, "Failed to open shader: %s\n", filename);
-        return NULL;
+        SDL_Log("Failed to open shader: %s", filename);
+        return nullptr;
     }
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
@@ -37,23 +61,7 @@ uint32_t* load_shader_file(const char* filename, size_t* out_size) {
     return data;
 }
 
-int main(int argc, char* argv[]) {
-    (void)argc; (void)argv;
-    printf("=== Minimal Vulkan Triangle ===\n\n");
-
-    if (!SDL_Init(SDL_INIT_VIDEO)) {
-        fprintf(stderr, "SDL_Init failed\n");
-        return 1;
-    }
-
-    SDL_Window* window = SDL_CreateWindow("Vulkan Triangle", WINDOW_WIDTH, WINDOW_HEIGHT, SDL_WINDOW_VULKAN);
-    if (!window) {
-        fprintf(stderr, "Window creation failed\n");
-        return 1;
-    }
-    printf("✓ Window created\n");
-
-    /* --- Vulkan Instance --- */
+void init_vulkan(AppState* app) {
     const char* extensions[] = {
         VK_KHR_SURFACE_EXTENSION_NAME,
 #ifdef VK_USE_PLATFORM_WIN32_KHR
@@ -83,83 +91,74 @@ int main(int argc, char* argv[]) {
 #endif
     };
 
-    VkInstance instance;
-    check_vk(vkCreateInstance(&instance_info, NULL, &instance), "vkCreateInstance");
-    printf("✓ Instance created\n");
+    check_vk(vkCreateInstance(&instance_info, NULL, &app->instance), "vkCreateInstance");
 
     /* --- Surface --- */
-    VkSurfaceKHR surface = NULL;
 #ifdef VK_USE_PLATFORM_WIN32_KHR
     VkWin32SurfaceCreateInfoKHR win32_info = {
         .sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR,
         .hinstance = GetModuleHandle(NULL),
-        .hwnd = (HWND)SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL),
+        .hwnd = (HWND)SDL_GetPointerProperty(SDL_GetWindowProperties(app->window), SDL_PROP_WINDOW_WIN32_HWND_POINTER, NULL),
     };
-    check_vk(vkCreateWin32SurfaceKHR(instance, &win32_info, NULL, &surface), "vkCreateWin32SurfaceKHR");
+    check_vk(vkCreateWin32SurfaceKHR(app->instance, &win32_info, NULL, &app->surface), "vkCreateWin32SurfaceKHR");
 #elif defined(VK_USE_PLATFORM_XLIB_KHR)
     VkXlibSurfaceCreateInfoKHR xlib_info = {
         .sType = VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR,
-        .dpy = (Display*)SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_X11_DISPLAY_POINTER, NULL),
-        .window = (Window)SDL_GetNumberProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0),
+        .dpy = (Display*)SDL_GetPointerProperty(SDL_GetWindowProperties(app->window), SDL_PROP_WINDOW_X11_DISPLAY_POINTER, NULL),
+        .window = (Window)SDL_GetNumberProperty(SDL_GetWindowProperties(app->window), SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0),
     };
-    check_vk(vkCreateXlibSurfaceKHR(instance, &xlib_info, NULL, &surface), "vkCreateXlibSurfaceKHR");
+    check_vk(vkCreateXlibSurfaceKHR(app->instance, &xlib_info, NULL, &app->surface), "vkCreateXlibSurfaceKHR");
 #elif defined(VK_USE_PLATFORM_METAL_EXT)
     VkMetalSurfaceCreateInfoEXT metal_info = {
         .sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT,
-        .pLayer = (CAMetalLayer*)SDL_GetPointerProperty(SDL_GetWindowProperties(window), "SDL.window.uikit.metal_layer", NULL),
+        .pLayer = (CAMetalLayer*)SDL_GetPointerProperty(SDL_GetWindowProperties(app->window), "SDL.window.uikit.metal_layer", NULL),
     };
-    check_vk(vkCreateMetalSurfaceEXT(instance, &metal_info, NULL, &surface), "vkCreateMetalSurfaceEXT");
+    check_vk(vkCreateMetalSurfaceEXT(app->instance, &metal_info, NULL, &app->surface), "vkCreateMetalSurfaceEXT");
 #endif
-    printf("✓ Surface created\n");
 
     /* --- Physical Device --- */
     uint32_t device_count = 0;
-    check_vk(vkEnumeratePhysicalDevices(instance, &device_count, NULL), "enumerate count");
+    check_vk(vkEnumeratePhysicalDevices(app->instance, &device_count, NULL), "enumerate count");
     VkPhysicalDevice* devices = (VkPhysicalDevice*)malloc(sizeof(VkPhysicalDevice) * device_count);
-    check_vk(vkEnumeratePhysicalDevices(instance, &device_count, devices), "enumerate devices");
-    VkPhysicalDevice physical_device = devices[0];
+    check_vk(vkEnumeratePhysicalDevices(app->instance, &device_count, devices), "enumerate devices");
+    app->physical_device = devices[0];
     free(devices);
-    printf("✓ Physical device selected\n");
 
     /* --- Queue Family --- */
     uint32_t qfam_count = 0;
-    vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &qfam_count, NULL);
+    vkGetPhysicalDeviceQueueFamilyProperties(app->physical_device, &qfam_count, NULL);
     VkQueueFamilyProperties* qfams = (VkQueueFamilyProperties*)malloc(sizeof(VkQueueFamilyProperties) * qfam_count);
-    vkGetPhysicalDeviceQueueFamilyProperties(physical_device, &qfam_count, qfams);
-    uint32_t graphics_family = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(app->physical_device, &qfam_count, qfams);
     for (uint32_t i = 0; i < qfam_count; i++) {
         if (qfams[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
-            graphics_family = i;
+            app->graphics_family = i;
             break;
         }
     }
     free(qfams);
-    printf("✓ Graphics queue family: %u\n", graphics_family);
 
     /* --- Surface Capabilities --- */
-    VkSurfaceCapabilitiesKHR surface_caps;
-    check_vk(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical_device, surface, &surface_caps), "surface caps");
+    check_vk(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(app->physical_device, app->surface, &app->surface_caps), "surface caps");
 
     uint32_t format_count = 0;
-    check_vk(vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &format_count, NULL), "format count");
+    check_vk(vkGetPhysicalDeviceSurfaceFormatsKHR(app->physical_device, app->surface, &format_count, NULL), "format count");
     VkSurfaceFormatKHR* formats = (VkSurfaceFormatKHR*)malloc(sizeof(VkSurfaceFormatKHR) * format_count);
-    check_vk(vkGetPhysicalDeviceSurfaceFormatsKHR(physical_device, surface, &format_count, formats), "formats");
+    check_vk(vkGetPhysicalDeviceSurfaceFormatsKHR(app->physical_device, app->surface, &format_count, formats), "formats");
     VkSurfaceFormatKHR surface_format = formats[0];
     free(formats);
 
     uint32_t mode_count = 0;
-    check_vk(vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &mode_count, NULL), "mode count");
+    check_vk(vkGetPhysicalDeviceSurfacePresentModesKHR(app->physical_device, app->surface, &mode_count, NULL), "mode count");
     VkPresentModeKHR* modes = (VkPresentModeKHR*)malloc(sizeof(VkPresentModeKHR) * mode_count);
-    check_vk(vkGetPhysicalDeviceSurfacePresentModesKHR(physical_device, surface, &mode_count, modes), "modes");
+    check_vk(vkGetPhysicalDeviceSurfacePresentModesKHR(app->physical_device, app->surface, &mode_count, modes), "modes");
     VkPresentModeKHR present_mode = modes[0];
     free(modes);
-    printf("✓ Surface formats queried\n");
 
     /* --- Logical Device --- */
     float priority = 1.0f;
     VkDeviceQueueCreateInfo queue_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-        .queueFamilyIndex = graphics_family,
+        .queueFamilyIndex = app->graphics_family,
         .queueCount = 1,
         .pQueuePriorities = &priority,
     };
@@ -173,53 +172,45 @@ int main(int argc, char* argv[]) {
         .ppEnabledExtensionNames = device_exts,
     };
 
-    VkDevice device;
-    check_vk(vkCreateDevice(physical_device, &device_info, NULL, &device), "vkCreateDevice");
-    printf("✓ Logical device created\n");
-
-    VkQueue graphics_queue;
-    vkGetDeviceQueue(device, graphics_family, 0, &graphics_queue);
+    check_vk(vkCreateDevice(app->physical_device, &device_info, NULL, &app->device), "vkCreateDevice");
+    vkGetDeviceQueue(app->device, app->graphics_family, 0, &app->graphics_queue);
 
     /* --- Swapchain --- */
     VkSwapchainCreateInfoKHR swapchain_info = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-        .surface = surface,
+        .surface = app->surface,
         .minImageCount = 2,
         .imageFormat = surface_format.format,
         .imageColorSpace = surface_format.colorSpace,
-        .imageExtent = surface_caps.currentExtent,
+        .imageExtent = app->surface_caps.currentExtent,
         .imageArrayLayers = 1,
         .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
-        .preTransform = surface_caps.currentTransform,
+        .preTransform = app->surface_caps.currentTransform,
         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
         .presentMode = present_mode,
         .clipped = VK_TRUE,
     };
 
-    VkSwapchainKHR swapchain;
-    check_vk(vkCreateSwapchainKHR(device, &swapchain_info, NULL, &swapchain), "vkCreateSwapchainKHR");
-    printf("✓ Swapchain created\n");
+    check_vk(vkCreateSwapchainKHR(app->device, &swapchain_info, NULL, &app->swapchain), "vkCreateSwapchainKHR");
 
     /* --- Swapchain Images & Image Views --- */
-    uint32_t image_count = 0;
-    check_vk(vkGetSwapchainImagesKHR(device, swapchain, &image_count, NULL), "image count");
-    VkImage* images = (VkImage*)malloc(sizeof(VkImage) * image_count);
-    check_vk(vkGetSwapchainImagesKHR(device, swapchain, &image_count, images), "images");
+    check_vk(vkGetSwapchainImagesKHR(app->device, app->swapchain, &app->image_count, NULL), "image count");
+    app->images = (VkImage*)malloc(sizeof(VkImage) * app->image_count);
+    check_vk(vkGetSwapchainImagesKHR(app->device, app->swapchain, &app->image_count, app->images), "images");
 
-    VkImageView* image_views = (VkImageView*)malloc(sizeof(VkImageView) * image_count);
-    for (uint32_t i = 0; i < image_count; i++) {
+    app->image_views = (VkImageView*)malloc(sizeof(VkImageView) * app->image_count);
+    for (uint32_t i = 0; i < app->image_count; i++) {
         VkImageViewCreateInfo view_info = {
             .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-            .image = images[i],
+            .image = app->images[i],
             .viewType = VK_IMAGE_VIEW_TYPE_2D,
             .format = surface_format.format,
             .components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY},
             .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
         };
-        check_vk(vkCreateImageView(device, &view_info, NULL, &image_views[i]), "vkCreateImageView");
+        check_vk(vkCreateImageView(app->device, &view_info, NULL, &app->image_views[i]), "vkCreateImageView");
     }
-    printf("✓ Image views created\n");
 
     /* --- Render Pass --- */
     VkAttachmentDescription attachment = {
@@ -244,44 +235,39 @@ int main(int argc, char* argv[]) {
         .pSubpasses = &subpass,
     };
 
-    VkRenderPass render_pass;
-    check_vk(vkCreateRenderPass(device, &render_pass_info, NULL, &render_pass), "vkCreateRenderPass");
-    printf("✓ Render pass created\n");
+    check_vk(vkCreateRenderPass(app->device, &render_pass_info, NULL, &app->render_pass), "vkCreateRenderPass");
 
     /* --- Framebuffers --- */
-    VkFramebuffer* framebuffers = (VkFramebuffer*)malloc(sizeof(VkFramebuffer) * image_count);
-    for (uint32_t i = 0; i < image_count; i++) {
+    app->framebuffers = (VkFramebuffer*)malloc(sizeof(VkFramebuffer) * app->image_count);
+    for (uint32_t i = 0; i < app->image_count; i++) {
         VkFramebufferCreateInfo fb_info = {
             .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
-            .renderPass = render_pass,
+            .renderPass = app->render_pass,
             .attachmentCount = 1,
-            .pAttachments = &image_views[i],
-            .width = surface_caps.currentExtent.width,
-            .height = surface_caps.currentExtent.height,
+            .pAttachments = &app->image_views[i],
+            .width = app->surface_caps.currentExtent.width,
+            .height = app->surface_caps.currentExtent.height,
             .layers = 1,
         };
-        check_vk(vkCreateFramebuffer(device, &fb_info, NULL, &framebuffers[i]), "vkCreateFramebuffer");
+        check_vk(vkCreateFramebuffer(app->device, &fb_info, NULL, &app->framebuffers[i]), "vkCreateFramebuffer");
     }
-    printf("✓ Framebuffers created\n");
 
-    /* --- Load & Create Shaders --- */
+    /* --- Shaders --- */
     size_t vert_size, frag_size;
     uint32_t* vert_spv = load_shader_file(SHADER_OUTPUT_DIR "/vert.spv", &vert_size);
     uint32_t* frag_spv = load_shader_file(SHADER_OUTPUT_DIR "/frag.spv", &frag_size);
-    if (!vert_spv || !frag_spv) return 1;
+    if (!vert_spv || !frag_spv) return;
 
     VkShaderModuleCreateInfo vert_info = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = vert_size, .pCode = vert_spv};
     VkShaderModuleCreateInfo frag_info = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = frag_size, .pCode = frag_spv};
     
     VkShaderModule vert_shader, frag_shader;
-    check_vk(vkCreateShaderModule(device, &vert_info, NULL, &vert_shader), "vert shader");
-    check_vk(vkCreateShaderModule(device, &frag_info, NULL, &frag_shader), "frag shader");
-    printf("✓ Shaders loaded\n");
+    check_vk(vkCreateShaderModule(app->device, &vert_info, NULL, &vert_shader), "vert shader");
+    check_vk(vkCreateShaderModule(app->device, &frag_info, NULL, &frag_shader), "frag shader");
 
     /* --- Pipeline Layout --- */
     VkPipelineLayoutCreateInfo layout_info = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    VkPipelineLayout pipeline_layout;
-    check_vk(vkCreatePipelineLayout(device, &layout_info, NULL, &pipeline_layout), "vkCreatePipelineLayout");
+    check_vk(vkCreatePipelineLayout(app->device, &layout_info, NULL, &app->pipeline_layout), "vkCreatePipelineLayout");
 
     /* --- Graphics Pipeline --- */
     VkPipelineShaderStageCreateInfo stages[2] = {
@@ -292,8 +278,8 @@ int main(int argc, char* argv[]) {
     VkPipelineVertexInputStateCreateInfo vertex_input = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     VkPipelineInputAssemblyStateCreateInfo input_assembly = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST};
 
-    VkViewport viewport = {.x = 0, .y = 0, .width = (float)surface_caps.currentExtent.width, .height = (float)surface_caps.currentExtent.height, .minDepth = 0.0f, .maxDepth = 1.0f};
-    VkRect2D scissor = {.offset = {0, 0}, .extent = surface_caps.currentExtent};
+    VkViewport viewport = {.x = 0, .y = 0, .width = (float)app->surface_caps.currentExtent.width, .height = (float)app->surface_caps.currentExtent.height, .minDepth = 0.0f, .maxDepth = 1.0f};
+    VkRect2D scissor = {.offset = {0, 0}, .extent = app->surface_caps.currentExtent};
     VkPipelineViewportStateCreateInfo viewport_state = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .pViewports = &viewport, .scissorCount = 1, .pScissors = &scissor};
 
     VkPipelineRasterizationStateCreateInfo rasterizer = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_BACK_BIT, .frontFace = VK_FRONT_FACE_CLOCKWISE, .lineWidth = 1.0f};
@@ -312,142 +298,157 @@ int main(int argc, char* argv[]) {
         .pRasterizationState = &rasterizer,
         .pMultisampleState = &multisampling,
         .pColorBlendState = &color_blending,
-        .layout = pipeline_layout,
-        .renderPass = render_pass,
+        .layout = app->pipeline_layout,
+        .renderPass = app->render_pass,
         .subpass = 0,
     };
 
-    VkPipeline pipeline;
-    check_vk(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_info, NULL, &pipeline), "vkCreateGraphicsPipelines");
-    printf("✓ Graphics pipeline created\n");
+    check_vk(vkCreateGraphicsPipelines(app->device, VK_NULL_HANDLE, 1, &pipeline_info, NULL, &app->pipeline), "vkCreateGraphicsPipelines");
 
     /* --- Command Pool & Buffers --- */
     VkCommandPoolCreateInfo pool_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
         .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
-        .queueFamilyIndex = graphics_family,
+        .queueFamilyIndex = app->graphics_family,
     };
-    VkCommandPool command_pool;
-    check_vk(vkCreateCommandPool(device, &pool_info, NULL, &command_pool), "vkCreateCommandPool");
+    check_vk(vkCreateCommandPool(app->device, &pool_info, NULL, &app->command_pool), "vkCreateCommandPool");
 
-    VkCommandBuffer* command_buffers = (VkCommandBuffer*)malloc(sizeof(VkCommandBuffer) * image_count);
+    app->command_buffers = (VkCommandBuffer*)malloc(sizeof(VkCommandBuffer) * app->image_count);
     VkCommandBufferAllocateInfo alloc_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .commandPool = command_pool,
+        .commandPool = app->command_pool,
         .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = image_count,
+        .commandBufferCount = app->image_count,
     };
-    check_vk(vkAllocateCommandBuffers(device, &alloc_info, command_buffers), "vkAllocateCommandBuffers");
+    check_vk(vkAllocateCommandBuffers(app->device, &alloc_info, app->command_buffers), "vkAllocateCommandBuffers");
 
     /* --- Record Command Buffers --- */
-    for (uint32_t i = 0; i < image_count; i++) {
+    for (uint32_t i = 0; i < app->image_count; i++) {
         VkCommandBufferBeginInfo begin_info = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        check_vk(vkBeginCommandBuffer(command_buffers[i], &begin_info), "vkBeginCommandBuffer");
+        check_vk(vkBeginCommandBuffer(app->command_buffers[i], &begin_info), "vkBeginCommandBuffer");
 
         VkClearValue clear = {{0.0f, 0.0f, 0.0f, 1.0f}};
         VkRenderPassBeginInfo render_pass_begin = {
             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-            .renderPass = render_pass,
-            .framebuffer = framebuffers[i],
-            .renderArea = {{0, 0}, surface_caps.currentExtent},
+            .renderPass = app->render_pass,
+            .framebuffer = app->framebuffers[i],
+            .renderArea = {{0, 0}, app->surface_caps.currentExtent},
             .clearValueCount = 1,
             .pClearValues = &clear,
         };
 
-        vkCmdBeginRenderPass(command_buffers[i], &render_pass_begin, VK_SUBPASS_CONTENTS_INLINE);
-        vkCmdBindPipeline(command_buffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-        vkCmdDraw(command_buffers[i], 3, 1, 0, 0);
-        vkCmdEndRenderPass(command_buffers[i]);
+        vkCmdBeginRenderPass(app->command_buffers[i], &render_pass_begin, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(app->command_buffers[i], VK_PIPELINE_BIND_POINT_GRAPHICS, app->pipeline);
+        vkCmdDraw(app->command_buffers[i], 3, 1, 0, 0);
+        vkCmdEndRenderPass(app->command_buffers[i]);
 
-        check_vk(vkEndCommandBuffer(command_buffers[i]), "vkEndCommandBuffer");
+        check_vk(vkEndCommandBuffer(app->command_buffers[i]), "vkEndCommandBuffer");
     }
-    printf("✓ Command buffers recorded\n");
 
     /* --- Synchronization --- */
     VkSemaphoreCreateInfo sem_info = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     VkFenceCreateInfo fence_info = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, .flags = VK_FENCE_CREATE_SIGNALED_BIT};
     
-    VkSemaphore image_available, render_finished;
-    VkFence in_flight;
-    check_vk(vkCreateSemaphore(device, &sem_info, NULL, &image_available), "image_available");
-    check_vk(vkCreateSemaphore(device, &sem_info, NULL, &render_finished), "render_finished");
-    check_vk(vkCreateFence(device, &fence_info, NULL, &in_flight), "in_flight");
-    printf("✓ Sync primitives created\n");
+    check_vk(vkCreateSemaphore(app->device, &sem_info, NULL, &app->image_available_sem), "image_available");
+    check_vk(vkCreateSemaphore(app->device, &sem_info, NULL, &app->render_finished_sem), "render_finished");
+    check_vk(vkCreateFence(app->device, &fence_info, NULL, &app->in_flight_fence), "in_flight");
 
-    /* --- Main Loop --- */
-    printf("\n=== Running (close window to exit) ===\n");
-    bool running = true;
-    SDL_Event event;
-
-    while (running) {
-        while (SDL_PollEvent(&event)) {
-            if (event.type == SDL_EVENT_QUIT) running = false;
-        }
-
-        check_vk(vkWaitForFences(device, 1, &in_flight, VK_TRUE, UINT64_MAX), "vkWaitForFences");
-        check_vk(vkResetFences(device, 1, &in_flight), "vkResetFences");
-
-        uint32_t image_index;
-        check_vk(vkAcquireNextImageKHR(device, swapchain, UINT64_MAX, image_available, VK_NULL_HANDLE, &image_index), "vkAcquireNextImageKHR");
-
-        VkPipelineStageFlags wait_stages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
-        VkSubmitInfo submit_info = {
-            .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-            .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &image_available,
-            .pWaitDstStageMask = wait_stages,
-            .commandBufferCount = 1,
-            .pCommandBuffers = &command_buffers[image_index],
-            .signalSemaphoreCount = 1,
-            .pSignalSemaphores = &render_finished,
-        };
-        check_vk(vkQueueSubmit(graphics_queue, 1, &submit_info, in_flight), "vkQueueSubmit");
-
-        VkPresentInfoKHR present_info = {
-            .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
-            .waitSemaphoreCount = 1,
-            .pWaitSemaphores = &render_finished,
-            .swapchainCount = 1,
-            .pSwapchains = &swapchain,
-            .pImageIndices = &image_index,
-        };
-        check_vk(vkQueuePresentKHR(graphics_queue, &present_info), "vkQueuePresentKHR");
-
-        SDL_Delay(16);
-    }
-
-    /* --- Cleanup --- */
-    check_vk(vkDeviceWaitIdle(device), "vkDeviceWaitIdle");
-    printf("\n✓ Shutting down...\n");
-
-    vkDestroySemaphore(device, image_available, NULL);
-    vkDestroySemaphore(device, render_finished, NULL);
-    vkDestroyFence(device, in_flight, NULL);
-    vkDestroyCommandPool(device, command_pool, NULL);
-    vkDestroyPipeline(device, pipeline, NULL);
-    vkDestroyPipelineLayout(device, pipeline_layout, NULL);
-    vkDestroyShaderModule(device, vert_shader, NULL);
-    vkDestroyShaderModule(device, frag_shader, NULL);
-    for (uint32_t i = 0; i < image_count; i++) {
-        vkDestroyFramebuffer(device, framebuffers[i], NULL);
-        vkDestroyImageView(device, image_views[i], NULL);
-    }
-    vkDestroyRenderPass(device, render_pass, NULL);
-    vkDestroySwapchainKHR(device, swapchain, NULL);
-    vkDestroyDevice(device, NULL);
-    vkDestroySurfaceKHR(instance, surface, NULL);
-    vkDestroyInstance(instance, NULL);
-
-    free(images);
-    free(image_views);
-    free(framebuffers);
-    free(command_buffers);
     free(vert_spv);
     free(frag_spv);
+}
 
-    SDL_DestroyWindow(window);
+void cleanup_vulkan(AppState* app) {
+    vkDeviceWaitIdle(app->device);
+
+    vkDestroySemaphore(app->device, app->image_available_sem, NULL);
+    vkDestroySemaphore(app->device, app->render_finished_sem, NULL);
+    vkDestroyFence(app->device, app->in_flight_fence, NULL);
+    vkDestroyCommandPool(app->device, app->command_pool, NULL);
+    vkDestroyPipeline(app->device, app->pipeline, NULL);
+    vkDestroyPipelineLayout(app->device, app->pipeline_layout, NULL);
+    for (uint32_t i = 0; i < app->image_count; i++) {
+        vkDestroyFramebuffer(app->device, app->framebuffers[i], NULL);
+        vkDestroyImageView(app->device, app->image_views[i], NULL);
+    }
+    vkDestroyRenderPass(app->device, app->render_pass, NULL);
+    vkDestroySwapchainKHR(app->device, app->swapchain, NULL);
+    vkDestroyDevice(app->device, NULL);
+    vkDestroySurfaceKHR(app->instance, app->surface, NULL);
+    vkDestroyInstance(app->instance, NULL);
+
+    free(app->images);
+    free(app->image_views);
+    free(app->framebuffers);
+    free(app->command_buffers);
+}
+
+void render_frame(AppState* app) {
+    check_vk(vkWaitForFences(app->device, 1, &app->in_flight_fence, VK_TRUE, UINT64_MAX), "vkWaitForFences");
+    check_vk(vkResetFences(app->device, 1, &app->in_flight_fence), "vkResetFences");
+
+    uint32_t image_index;
+    check_vk(vkAcquireNextImageKHR(app->device, app->swapchain, UINT64_MAX, app->image_available_sem, VK_NULL_HANDLE, &image_index), "vkAcquireNextImageKHR");
+
+    VkPipelineStageFlags wait_stages[] = {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+    VkSubmitInfo submit_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &app->image_available_sem,
+        .pWaitDstStageMask = wait_stages,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &app->command_buffers[image_index],
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores = &app->render_finished_sem,
+    };
+    check_vk(vkQueueSubmit(app->graphics_queue, 1, &submit_info, app->in_flight_fence), "vkQueueSubmit");
+
+    VkPresentInfoKHR present_info = {
+        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &app->render_finished_sem,
+        .swapchainCount = 1,
+        .pSwapchains = &app->swapchain,
+        .pImageIndices = &image_index,
+    };
+    check_vk(vkQueuePresentKHR(app->graphics_queue, &present_info), "vkQueuePresentKHR");
+}
+
+SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
+    auto app = std::make_unique<AppState>();
+    *appstate = app.release();
+
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        SDL_Log("SDL_Init failed: %s", SDL_GetError());
+        return SDL_APP_FAILURE;
+    }
+
+    app = std::unique_ptr<AppState>((AppState*)*appstate);
+    app->window = SDL_CreateWindow("Part 03 - Vulkan Triangle", WINDOW_WIDTH, WINDOW_HEIGHT, SDL_WINDOW_VULKAN);
+    if (!app->window) {
+        SDL_Log("Window creation failed: %s", SDL_GetError());
+        SDL_Quit();
+        return SDL_APP_FAILURE;
+    }
+
+    init_vulkan(app.get());
+    *appstate = app.release();
+
+    return SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event) {
+    return (event->type == SDL_EVENT_QUIT) ? SDL_APP_SUCCESS : SDL_APP_CONTINUE;
+}
+
+SDL_AppResult SDL_AppIterate(void* appstate) {
+    render_frame((AppState*)appstate);
+    SDL_Delay(16);
+    return SDL_APP_CONTINUE;
+}
+
+void SDL_AppQuit(void* appstate, SDL_AppResult result) {
+    auto app = std::unique_ptr<AppState>((AppState*)appstate);
+    cleanup_vulkan(app.get());
+    SDL_DestroyWindow(app->window);
     SDL_Quit();
-
-    printf("✓ Done!\n");
-    return 0;
 }

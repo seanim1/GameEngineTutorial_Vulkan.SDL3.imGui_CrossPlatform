@@ -27,12 +27,7 @@ elseif(UNIX)
     target_compile_definitions(vulkan_deps INTERFACE VK_USE_PLATFORM_XLIB_KHR)
 endif()
 
-# Find glslangValidator for shader compilation
-find_program(GLSLANG_VALIDATOR glslangValidator REQUIRED)
-message(STATUS "Found glslangValidator: ${GLSLANG_VALIDATOR}")
-
 add_subdirectory(Part_00_init_SDL3)
 add_subdirectory(Part_01_window)
 add_subdirectory(Part_02_vk_instance)
 add_subdirectory(Part_03_minimal_triangle)
-add_subdirectory(Part_04_triangle_SDL3)

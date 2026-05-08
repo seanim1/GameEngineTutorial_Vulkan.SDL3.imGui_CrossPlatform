@@ -10,7 +10,7 @@ if (-Not (Test-Path "C:\vcpkg")) {
     & C:\vcpkg\bootstrap-vcpkg.bat
 }
 
-$packages = @("sdl3:x64-windows", "vulkan:x64-windows", "glslang:x64-windows")
+$packages = @("sdl3:x64-windows", "vulkan:x64-windows")
 foreach ($pkg in $packages) {
     & C:\vcpkg\vcpkg.exe install $pkg
 }

@@ -11,7 +11,6 @@ $targets = @(
     "build\Part_01_window\Debug\",
     "build\Part_02_vk_instance\Debug\"
     "build\Part_03_minimal_triangle\Debug\"
-    "build\Part_04_triangle_SDL3\Debug\"
 )
 
 foreach ($target in $targets) {

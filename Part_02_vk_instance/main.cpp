@@ -1,23 +1,29 @@
+#define SDL_MAIN_USE_CALLBACKS 1
+
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
+#include <SDL3/SDL_main_impl.h>
 #include <vulkan/vulkan.h>
+#include <memory>
 #ifdef __APPLE__
     #define VK_ENABLE_BETA_EXTENSIONS
     #include <vulkan/vulkan_metal.h>
     #include <vulkan/vulkan_beta.h>
 #endif
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+
+struct AppState {
+    SDL_Window* window = nullptr;
+    VkInstance instance = nullptr;
+};
 
 void check_vk(VkResult result, const char* op) {
     if (result != VK_SUCCESS) {
-        fprintf(stderr, "Vulkan error (%s): %d\n", op, result);
+        SDL_Log("Vulkan error (%s): %d", op, result);
         exit(1);
     }
 }
 
-VkInstance create_instance() {
+void init_vulkan(AppState* app) {
     const char* extensions[] = {
         VK_KHR_SURFACE_EXTENSION_NAME,
 #ifdef VK_USE_PLATFORM_WIN32_KHR
@@ -34,8 +40,6 @@ VkInstance create_instance() {
 #endif
     };
 
-    uint32_t ext_count = sizeof(extensions) / sizeof(extensions[0]);
-
     VkApplicationInfo app_info = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
         .pApplicationName = "Triangle",
@@ -46,61 +50,53 @@ VkInstance create_instance() {
     VkInstanceCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pApplicationInfo = &app_info,
-        .enabledExtensionCount = ext_count,
+        .enabledExtensionCount = sizeof(extensions) / sizeof(extensions[0]),
         .ppEnabledExtensionNames = extensions,
 #ifdef VK_USE_PLATFORM_METAL_EXT
         .flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR,
 #endif
     };
 
-    VkInstance instance;
-    check_vk(vkCreateInstance(&create_info, NULL, &instance), "vkCreateInstance");
-    printf("✓ Instance created\n");
-    return instance;
+    check_vk(vkCreateInstance(&create_info, NULL, &app->instance), "vkCreateInstance");
 }
 
-int main(int argc, char* argv[]) {
-    (void)argc;
-    (void)argv;
-
-    printf("=== Minimal Triangle Setup ===\n\n");
+SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
+    auto app = std::make_unique<AppState>();
+    *appstate = app.release();
 
     if (!SDL_Init(SDL_INIT_VIDEO)) {
-        fprintf(stderr, "SDL_Init failed\n");
-        return 1;
+        SDL_Log("SDL_Init failed: %s", SDL_GetError());
+        return SDL_APP_FAILURE;
     }
 
-    SDL_Window* window = SDL_CreateWindow(
-        "Triangle", 800, 600, SDL_WINDOW_VULKAN
-    );
-    if (!window) {
-        fprintf(stderr, "Window creation failed\n");
+    app = std::unique_ptr<AppState>((AppState*)*appstate);
+    app->window = SDL_CreateWindow("Part 02 - Vulkan Instance", 800, 600, SDL_WINDOW_VULKAN);
+    if (!app->window) {
+        SDL_Log("Window creation failed: %s", SDL_GetError());
         SDL_Quit();
-        return 1;
+        return SDL_APP_FAILURE;
     }
 
-    printf("✓ Window created (800x600)\n");
+    init_vulkan(app.get());
+    *appstate = app.release();
 
-    VkInstance instance = create_instance();
+    return SDL_APP_CONTINUE;
+}
 
-    // TODO: Physical device selection, surface creation, swapchain, etc.
+SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event) {
+    return (event->type == SDL_EVENT_QUIT || 
+            (event->type == SDL_EVENT_KEY_DOWN && event->key.key == SDLK_ESCAPE)) 
+        ? SDL_APP_SUCCESS : SDL_APP_CONTINUE;
+}
 
-    bool running = true;
-    SDL_Event event;
-    while (running) {
-        while (SDL_PollEvent(&event)) {
-            if (event.type == SDL_EVENT_QUIT || 
-                (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE)) {
-                running = false;
-            }
-        }
-        SDL_Delay(16);
-    }
+SDL_AppResult SDL_AppIterate(void* appstate) {
+    SDL_Delay(16);
+    return SDL_APP_CONTINUE;
+}
 
-    vkDestroyInstance(instance, NULL);
-    SDL_DestroyWindow(window);
+void SDL_AppQuit(void* appstate, SDL_AppResult result) {
+    auto app = std::unique_ptr<AppState>((AppState*)appstate);
+    vkDestroyInstance(app->instance, NULL);
+    SDL_DestroyWindow(app->window);
     SDL_Quit();
-    printf("✓ Cleanup complete\n");
-
-    return 0;
 }
