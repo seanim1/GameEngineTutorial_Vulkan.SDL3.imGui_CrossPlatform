@@ -155,13 +155,13 @@ void init_vulkan(AppState* app) {
     }
 
     /* --- Create Instance --- */
-    VkApplicationInfo appInfo = {
+    VkApplicationInfo appInfo{
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-        .pApplicationName = "Triangle",
-        .pEngineName = "Triangle_Engine",
+        .pApplicationName = "Hello Triangle",
         .applicationVersion = VK_MAKE_VERSION(1, 0, 0),
+        .pEngineName = "No Engine",
         .engineVersion = VK_MAKE_VERSION(1, 0, 0),
-        .apiVersion = VK_API_VERSION_1_3,
+        .apiVersion = VK_API_VERSION_1_0,
     };
 
     VkInstanceCreateInfo instanceCreateInfo = {
